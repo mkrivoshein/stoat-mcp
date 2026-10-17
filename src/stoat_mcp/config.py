@@ -36,6 +36,7 @@ class Settings:
     message_limit: int = 2000
     max_chunks: int = 8
     max_upload_bytes: int = 20 * 1024 * 1024
+    search_scan_limit: int = 1000
     cache_ttl: int = 600
     request_timeout: float = 15.0
     rate_limit_per_second: float = 5.0
@@ -56,6 +57,7 @@ class Settings:
             message_limit=int(env.get("STOAT_MESSAGE_LIMIT", "2000")),
             max_chunks=int(env.get("STOAT_MAX_CHUNKS", "8")),
             max_upload_bytes=int(env.get("STOAT_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024))),
+            search_scan_limit=int(env.get("STOAT_SEARCH_SCAN_LIMIT", "1000")),
             cache_ttl=int(env.get("STOAT_CACHE_TTL", "600")),
             request_timeout=float(env.get("STOAT_REQUEST_TIMEOUT", "15")),
             rate_limit_per_second=float(env.get("STOAT_RATE_LIMIT_PER_SECOND", "5")),

@@ -51,9 +51,9 @@ def create_server(
             state["client"] = StoatClient(settings, transport=transport)
         return state["client"]
 
-    async def resolve(channel: str) -> str:
+    async def resolve(channel: str, identity: str | None = None) -> str:
         try:
-            return await stoat().resolve_channel_id(channel)
+            return await stoat().resolve_channel_id(channel, identity)
         except (StoatError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
 
@@ -76,8 +76,9 @@ def create_server(
         """
         if not content.strip():
             raise ToolError("content must not be empty")
-        channel_id = await resolve(channel)
-        chunks = split_message(content, settings.message_limit)
+        channel_id = await resolve(channel, identity)
+        # Only split as far as needed to decide between messages and attachment.
+        chunks = split_message(content, settings.message_limit, settings.max_chunks)
         try:
             if len(chunks) > settings.max_chunks:
                 file_id = await stoat().upload_attachment(
@@ -155,14 +156,21 @@ def create_server(
 
     @mcp.tool(annotations=READ_ONLY)
     async def stoat_search_messages(
-        query: Annotated[str, Field(description="Full-text search query.")],
+        query: Annotated[
+            str, Field(description="Words that must all appear in the message (case-insensitive).")
+        ],
         channel: Annotated[
             str | None,
             Field(description="Channel ID or name; omit to search all text channels."),
         ] = None,
         limit: Annotated[int, Field(ge=1, le=100, description="Maximum results.")] = 20,
     ) -> list[dict[str, Any]]:
-        """Search past messages for discussion topics or earlier deliverables."""
+        """Search past messages for discussion topics or earlier deliverables.
+
+        Results are newest first. Stoat does not allow bots to use its search
+        API, so only the most recent messages of each channel are scanned
+        (STOAT_SEARCH_SCAN_LIMIT, default 1,000 per channel).
+        """
         if not query.strip():
             raise ToolError("query must not be empty")
         try:
@@ -209,7 +217,7 @@ def create_server(
             raise ToolError(
                 f"content must be at most {settings.message_limit} characters"
             )
-        channel_id = await resolve(channel)
+        channel_id = await resolve(channel, identity)
         try:
             file_id = await stoat().upload_attachment(filename, data, identity=identity)
             msg = await stoat().send_message(

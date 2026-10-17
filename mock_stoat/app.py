@@ -8,6 +8,7 @@ Behaviour mirrors the real API where it matters for tests:
 * message content is limited to 2,000 characters
 * Autumn uploads are owned by the uploading bot, and a bot can only attach
   files it uploaded itself
+* ``POST /channels/{id}/search`` rejects bot accounts with ``IsBot``
 * ``GET /channels/{id}/messages`` returns newest first and supports
   ``limit``/``before``/``include_users``
 * rate limiting can be injected to return ``429`` with ``retry_after``
@@ -302,6 +303,9 @@ def create_app(state: MockStoat | None = None) -> Starlette:
         user_id = state.authenticate(request)
         if isinstance(user_id, JSONResponse):
             return user_id
+        if "bot" in state.users[user_id]:
+            # Upstream rejects bot accounts before running the search.
+            return error(400, "IsBot")
         channel = state.visible_channel(user_id, request.path_params["channel_id"])
         if isinstance(channel, JSONResponse):
             return channel

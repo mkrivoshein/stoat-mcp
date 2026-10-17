@@ -1,6 +1,8 @@
+import time
+
 import pytest
 
-from stoat_mcp.chunking import split_message
+from stoat_mcp.chunking import iter_chunks, split_message
 
 
 def test_short_message_is_single_chunk():
@@ -47,3 +49,32 @@ def test_code_fence_is_closed_and_reopened():
 def test_limit_too_small():
     with pytest.raises(ValueError):
         split_message("abc", 10)
+
+
+def test_overlong_fence_line_terminates():
+    """Regression: a fence line that leaves no room to reopen it used to loop forever."""
+    text = "```" + "a" * 1992 + "\n" + "x" * 100
+    chunks = split_message(text, 2000)
+    assert all(len(c) <= 2000 for c in chunks)
+    assert "x" * 100 in "".join(chunks)
+
+
+@pytest.mark.parametrize("limit", [32, 33, 50, 2000])
+def test_always_makes_progress(limit):
+    text = "```" + "b" * (limit * 3) + "\n" + "```py\n" + "c " * limit
+    chunks = split_message(text, limit)
+    assert chunks
+    assert all(len(c) <= limit for c in chunks)
+
+
+def test_max_chunks_stops_early_on_huge_input():
+    text = "z" * (20 * 1024 * 1024)
+    start = time.monotonic()
+    chunks = split_message(text, 2000, max_chunks=8)
+    assert len(chunks) == 9
+    assert time.monotonic() - start < 1
+
+
+def test_iter_chunks_is_lazy():
+    gen = iter_chunks("q" * 10_000, 100)
+    assert next(gen) == "q" * 96

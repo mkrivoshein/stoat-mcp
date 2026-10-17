@@ -126,8 +126,41 @@ async def test_search_all_text_channels_skips_voice(mcp_client, mock):
     await call(mcp_client, "stoat_post_message", channel="market-research", content="EU market notes")
     results = await call(mcp_client, "stoat_search_messages", query="market")
     assert {m["content"] for m in results} == {"EU market notes", "Kick-off: please research the EU market"}
-    searched = {r["path"] for r in mock.requests if r["path"].endswith("/search")}
-    assert searched == {f"/channels/{GENERAL}/search", f"/channels/{RESEARCH}/search"}
+    scanned = {r["path"] for r in mock.requests if r["path"].endswith("/messages") and r["method"] == "GET"}
+    assert scanned == {f"/channels/{GENERAL}/messages", f"/channels/{RESEARCH}/messages"}
+    assert not any(r["path"].endswith("/search") for r in mock.requests)
+
+
+async def test_search_matches_all_words_and_pages_through_history(mock, transport):
+    settings = make_settings(STOAT_SEARCH_SCAN_LIMIT="250")
+    async with Client(create_server(settings, transport=transport)) as client:
+        for i in range(260):
+            await call(client, "stoat_post_message", channel=GENERAL,
+                       content=f"Report {i}" if i % 50 == 0 else f"filler {i}")
+        results = await call(client, "stoat_search_messages", query="REPORT", channel="general")
+    # Newest first; "Report 0" is beyond the 250 most recent messages.
+    assert [m["content"] for m in results] == ["Report 250", "Report 200", "Report 150", "Report 100", "Report 50"]
+    pages = [r for r in mock.requests if r["path"] == f"/channels/{GENERAL}/messages" and r["method"] == "GET"]
+    assert [int(r["query"]["limit"]) for r in pages] == [100, 100, 50]
+
+
+async def test_mock_search_route_rejects_bots_like_upstream(transport):
+    import httpx
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://stoat.test") as api:
+        res = await api.post(f"/channels/{GENERAL}/search", json={"query": "x"},
+                             headers={"x-bot-token": "service-token"})
+    assert res.status_code == 400
+    assert res.json()["type"] == "IsBot"
+
+
+async def test_long_message_attachment_respects_upload_limit(mock, transport):
+    settings = make_settings(STOAT_MESSAGE_LIMIT="100", STOAT_MAX_CHUNKS="2", STOAT_MAX_UPLOAD_BYTES="500")
+    async with Client(create_server(settings, transport=transport)) as client:
+        with pytest.raises(ToolError, match="limit is 500"):
+            await client.call_tool("stoat_post_message", {"channel": GENERAL, "content": "word " * 200})
+    assert mock.attachments == {}
+    assert len(mock.messages[GENERAL]) == 1
 
 
 async def test_upload_file(mcp_client, mock):

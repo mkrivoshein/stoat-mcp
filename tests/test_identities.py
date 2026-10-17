@@ -114,3 +114,28 @@ async def test_history_attributes_each_agent_correctly(mcp_client):
         ("Research Agent", RESEARCHER_BOT),
         ("Review Agent", REVIEWER_BOT),
     ]
+
+
+async def test_identity_only_config_resolves_channel_names(mock, transport):
+    """With no default bot token, names resolve using the selected identity."""
+    settings = make_settings(STOAT_BOT_TOKEN="")
+    async with Client(create_server(settings, transport=transport)) as client:
+        await call(client, "stoat_post_message", channel="#general", content="researcher: hi", identity="researcher")
+        await call(client, "stoat_upload_file", channel="#general", filename="r.txt",
+                   file_bytes_base64=base64.b64encode(b"r").decode(), identity="reviewer")
+    authors = [m["author"] for m in mock.messages[GENERAL][1:]]
+    assert authors == [RESEARCHER_BOT, REVIEWER_BOT]
+    assert {r["token"] for r in mock.requests if r["path"] != "/"} == {"researcher-token", "reviewer-token"}
+
+
+async def test_channel_names_resolve_among_the_identitys_own_servers(mock, transport):
+    """#general exists in HQ and Lab. Only the service bot is in Lab, so the name
+    is ambiguous for it but not for the researcher."""
+    settings = make_settings(STOAT_SERVER_IDS="01HSERVER00000000000000000,01HSERVERB0000000000000000")
+    async with Client(create_server(settings, transport=transport)) as client:
+        result = await call(client, "stoat_post_message", channel="#general", content="researcher: hi",
+                            identity="researcher")
+        assert result["channel_id"] == GENERAL
+        res = await client.call_tool("stoat_post_message", {"channel": "#general", "content": "x"},
+                                     raise_on_error=False)
+        assert res.is_error and "ambiguous" in res.content[0].text

@@ -15,14 +15,16 @@ and the API never leave the mesh.
 | `stoat_post_message` | `channel`, `content`, `reply_to?`, `identity?` | Posts a message or reply. Content over the length limit is split on paragraph/line boundaries (code fences are closed and reopened across chunks); very long content is uploaded as a `message.md` attachment instead. |
 | `stoat_read_history` | `channel`, `limit=25`, `before?` | Recent history in chronological order with author names resolved (nickname → display name → username, masquerade honoured). |
 | `stoat_list_channels` | `server_id?` | Channels with name, type, topic, ID and server. |
-| `stoat_search_messages` | `query`, `channel?`, `limit=20` | Full-text search in one channel, or across all text channels of the configured servers. |
+| `stoat_search_messages` | `query`, `channel?`, `limit=20` | Finds messages containing every word of `query`, in one channel or across all text channels of the configured servers. Stoat's search API refuses bot accounts, so this scans each channel's most recent `STOAT_SEARCH_SCAN_LIMIT` messages. |
 | `stoat_upload_file` | `channel`, `filename`, `file_bytes_base64`, `content?`, `identity?` | Uploads to Autumn and posts the file as an attachment. |
 | `stoat_list_identities` | — | Names of the bot identities that can be passed as `identity`. |
 
 Everywhere a `channel` is accepted it may be a raw channel ID or a name
 (`#market-research` or `market-research`). Names are resolved against the
 channels of the servers in `STOAT_SERVER_IDS` and cached (default 10 minutes);
-ambiguous names return an error listing the matching IDs.
+ambiguous names return an error listing the matching IDs. When a tool is
+called with an `identity`, names are resolved among the channels that bot can
+see.
 
 ### Multiple bot identities
 
@@ -47,7 +49,8 @@ context or client logs.
 | `STOAT_AUTUMN_URL` | discovered from `GET /` | Autumn file server URL. |
 | `STOAT_MESSAGE_LIMIT` | `2000` | Max characters per message. |
 | `STOAT_MAX_CHUNKS` | `8` | Above this many chunks, content is sent as an attachment. |
-| `STOAT_MAX_UPLOAD_BYTES` | `20971520` | Upload size cap. |
+| `STOAT_MAX_UPLOAD_BYTES` | `20971520` | Upload size cap (applies to `stoat_upload_file` and to long messages sent as attachments). |
+| `STOAT_SEARCH_SCAN_LIMIT` | `1000` | Recent messages scanned per channel by `stoat_search_messages`. |
 | `STOAT_CACHE_TTL` | `600` | Seconds to cache channels and users. |
 | `STOAT_RATE_LIMIT_PER_SECOND` / `STOAT_RATE_LIMIT_BURST` | `5` / `10` | Client-side token bucket for API calls (`0` disables). HTTP 429 responses are retried using `retry_after`. |
 | `STOAT_REQUEST_TIMEOUT` | `15` | HTTP timeout in seconds. |
@@ -114,7 +117,8 @@ pytest
 and Autumn that this server uses. Like the real API, it authenticates every
 request by `x-bot-token`, authors messages as the bot that owns the token,
 only shows servers a bot is a member of, enforces the 2,000-character limit,
-and refuses to attach a file uploaded by a different bot. It can also inject
+refuses to attach a file uploaded by a different bot, and rejects bots on the
+search route with `IsBot`. It can also inject
 `429` responses. The seed data (servers, channels, bots and their tokens) is
 in `mock_stoat/app.py`; pass a JSON file of the same shape in
 `MOCK_STOAT_SEED` to replace it.

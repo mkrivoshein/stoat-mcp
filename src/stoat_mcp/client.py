@@ -20,6 +20,10 @@ MAX_RATE_LIMIT_RETRIES = 3
 class StoatError(RuntimeError):
     """An error that is safe to surface to the calling agent."""
 
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
 
 def is_ulid(value: str) -> bool:
     return bool(ULID_RE.fullmatch(value))
@@ -64,8 +68,10 @@ class StoatClient:
         self._bucket = TokenBucket(
             settings.rate_limit_per_second, settings.rate_limit_burst
         )
+        # Keyed by identity name ("" for the default bot): bots can belong to
+        # different servers, so each sees its own channel list.
         self._channels: TTLCache[str, list[dict[str, Any]]] = TTLCache(
-            maxsize=1, ttl=settings.cache_ttl
+            maxsize=64, ttl=settings.cache_ttl
         )
         self._users: TTLCache[str, dict[str, Any]] = TTLCache(
             maxsize=2048, ttl=settings.cache_ttl
@@ -106,7 +112,9 @@ class StoatClient:
                 await asyncio.sleep(_retry_after_seconds(res))
                 continue
             if res.is_error:
-                raise StoatError(_describe_error(method, path_or_url, res))
+                raise StoatError(
+                    _describe_error(method, path_or_url, res), status=res.status_code
+                )
             if res.status_code == 204 or not res.content:
                 return None
             return res.json()
@@ -115,12 +123,16 @@ class StoatClient:
 
     # ------------------------------------------------------------- Channels
 
-    async def list_channels(self, server_id: str | None = None) -> list[dict[str, Any]]:
-        """Return channels from the configured servers (or one given server)."""
+    async def list_channels(
+        self, server_id: str | None = None, identity: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return channels visible to ``identity`` in the configured servers
+        (or in one given server)."""
         if server_id:
-            return await self._fetch_server_channels(server_id)
+            return await self._fetch_server_channels(server_id, identity)
 
-        cached = self._channels.get("all")
+        key = _cache_key(identity)
+        cached = self._channels.get(key)
         if cached is not None:
             return cached
 
@@ -131,39 +143,50 @@ class StoatClient:
             )
         channels: list[dict[str, Any]] = []
         for sid in self.settings.server_ids:
-            channels.extend(await self._fetch_server_channels(sid))
-        self._channels["all"] = channels
+            try:
+                channels.extend(await self._fetch_server_channels(sid, identity))
+            except StoatError as exc:
+                if exc.status != 404:
+                    raise
+                # This bot is not a member of that server; it sees no channels there.
+        self._channels[key] = channels
         return channels
 
-    async def _fetch_server_channels(self, server_id: str) -> list[dict[str, Any]]:
+    async def _fetch_server_channels(
+        self, server_id: str, identity: str | None = None
+    ) -> list[dict[str, Any]]:
         server = await self.request(
-            "GET", f"/servers/{server_id}", params={"include_channels": "true"}
+            "GET",
+            f"/servers/{server_id}",
+            params={"include_channels": "true"},
+            identity=identity,
         )
         raw = server.get("channels", [])
         channels: list[dict[str, Any]] = []
         for item in raw:
             if isinstance(item, str):
-                item = await self.request("GET", f"/channels/{item}")
+                item = await self.request("GET", f"/channels/{item}", identity=identity)
             channels.append(item)
         for channel in channels:
             channel.setdefault("server", server_id)
             channel["_server_name"] = server.get("name")
         return channels
 
-    async def resolve_channel_id(self, channel: str) -> str:
-        """Resolve ``#name``, ``name`` or a raw channel ID to a channel ID."""
+    async def resolve_channel_id(self, channel: str, identity: str | None = None) -> str:
+        """Resolve ``#name``, ``name`` or a raw channel ID to a channel ID,
+        among the channels ``identity`` can see."""
         name = channel.strip().lstrip("#").strip()
         if not name:
             raise StoatError("Channel must not be empty")
         if is_ulid(name):
             return name.upper()
 
-        channels = await self.list_channels()
+        channels = await self.list_channels(identity=identity)
         matches = [c for c in channels if (c.get("name") or "").lower() == name.lower()]
         if not matches:
             # The cache may be stale (e.g. a channel was just created).
-            self._channels.pop("all", None)
-            channels = await self.list_channels()
+            self._channels.pop(_cache_key(identity), None)
+            channels = await self.list_channels(identity=identity)
             matches = [
                 c for c in channels if (c.get("name") or "").lower() == name.lower()
             ]
@@ -272,17 +295,49 @@ class StoatClient:
     async def search_messages(
         self, channel_id: str, query: str, limit: int
     ) -> list[dict[str, Any]]:
-        payload = await self.request(
-            "POST",
-            f"/channels/{channel_id}/search",
-            json={
-                "query": query,
-                "limit": limit,
-                "sort": "Relevance",
-                "include_users": True,
-            },
+        """Find messages containing every word of ``query`` (case-insensitive).
+
+        Stoat's ``/channels/{id}/search`` route rejects bot accounts, so this
+        scans the most recent ``search_scan_limit`` messages of the channel
+        instead. Results are newest first.
+        """
+        terms = query.lower().split()
+        hits: list[dict[str, Any]] = []
+        users: list[dict[str, Any]] = []
+        members: list[dict[str, Any]] = []
+        before: str | None = None
+        scanned = 0
+        while scanned < self.settings.search_scan_limit and len(hits) < limit:
+            page_size = min(100, self.settings.search_scan_limit - scanned)
+            params: dict[str, Any] = {
+                "limit": page_size,
+                "sort": "Latest",
+                "include_users": "true",
+            }
+            if before:
+                params["before"] = before
+            payload = await self.request(
+                "GET", f"/channels/{channel_id}/messages", params=params
+            )
+            if isinstance(payload, dict):
+                page = payload.get("messages", [])
+                users.extend(payload.get("users", []))
+                members.extend(payload.get("members", []))
+            else:
+                page = payload or []
+            if not page:
+                break
+            scanned += len(page)
+            hits.extend(
+                m for m in page
+                if all(t in (m.get("content") or "").lower() for t in terms)
+            )
+            before = page[-1]["_id"]
+            if len(page) < page_size:
+                break
+        return await self.format_messages(
+            {"messages": hits[:limit], "users": users, "members": members}
         )
-        return await self.format_messages(payload)
 
     async def send_message(
         self,
@@ -322,6 +377,11 @@ class StoatClient:
     async def upload_attachment(
         self, filename: str, data: bytes, identity: str | None = None
     ) -> str:
+        if len(data) > self.settings.max_upload_bytes:
+            raise StoatError(
+                f"file is {len(data):,} bytes; the limit is "
+                f"{self.settings.max_upload_bytes:,}"
+            )
         base = await self.autumn_url()
         res = await self.request(
             "POST",
@@ -330,6 +390,10 @@ class StoatClient:
             identity=identity,
         )
         return res["id"]
+
+
+def _cache_key(identity: str | None) -> str:
+    return identity.strip().lower() if identity else ""
 
 
 def ulid_timestamp(ulid: str | None) -> str | None:
