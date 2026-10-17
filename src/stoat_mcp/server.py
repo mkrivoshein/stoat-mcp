@@ -6,6 +6,7 @@ import base64
 import binascii
 from typing import Annotated, Any
 
+import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
@@ -36,15 +37,18 @@ READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
 
 
-def create_server(settings: Settings | None = None, client: StoatClient | None = None) -> FastMCP:
-    settings = settings or (client.settings if client else Settings.from_env())
+def create_server(
+    settings: Settings | None = None,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> FastMCP:
+    """Build the MCP server. ``transport`` lets tests point it at a mock API."""
+    settings = settings or Settings.from_env()
     state: dict[str, StoatClient] = {}
-    if client is not None:
-        state["client"] = client
 
     def stoat() -> StoatClient:
         if "client" not in state:
-            state["client"] = StoatClient(settings)
+            state["client"] = StoatClient(settings, transport=transport)
         return state["client"]
 
     async def resolve(channel: str) -> str:

@@ -108,4 +108,37 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Tests run against an in-memory fake of the Stoat API, so no instance is needed.
+### Mock Stoat
+
+[`mock_stoat/`](mock_stoat/) is a stateful mock of the parts of the Stoat API
+and Autumn that this server uses. Like the real API, it authenticates every
+request by `x-bot-token`, authors messages as the bot that owns the token,
+only shows servers a bot is a member of, enforces the 2,000-character limit,
+and refuses to attach a file uploaded by a different bot. It can also inject
+`429` responses. The seed data (servers, channels, bots and their tokens) is
+in `mock_stoat/app.py`; pass a JSON file of the same shape in
+`MOCK_STOAT_SEED` to replace it.
+
+The tests use it in three ways:
+
+- **In-process** (`tests/test_server.py`, `tests/test_identities.py`): the
+  MCP server's HTTP calls go straight to the mock app through
+  `httpx.ASGITransport`.
+- **Real processes** (`tests/test_e2e.py`): the mock and `stoat-mcp` start as
+  subprocesses, and MCP clients connect over Streamable HTTP.
+- **Docker**: the same e2e test runs against containers:
+
+  ```sh
+  docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from tests
+  ```
+
+  Without the `tests` service, the stack is a local sandbox: point an MCP
+  client at `http://localhost:8080/mcp`.
+
+`tests/test_identities.py` checks that agents posting at the same time under
+different identities are never mixed up. It looks at what the mock recorded
+(which token reached the API, who authored each message, who owns each file),
+not at what the tool reported.
+
+The mock covers only what this server calls. Before deploying, run a smoke
+test against a real (staging) Stoat instance by pointing `STOAT_API_URL` at it.

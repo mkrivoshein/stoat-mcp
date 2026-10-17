@@ -1,0 +1,8 @@
+# Test runner image for docker-compose.test.yml.
+FROM python:3.12-slim
+
+WORKDIR /src
+COPY . /src
+RUN pip install --no-cache-dir "/src[dev]"
+
+CMD ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_e2e.py"]

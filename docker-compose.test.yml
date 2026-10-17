@@ -1,0 +1,35 @@
+# End-to-end test stack: mock Stoat API + the real stoat-mcp image + pytest.
+#
+#   docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from tests
+#
+# Without the tests service it is also a local sandbox: connect an MCP client
+# to http://localhost:8080/mcp (bot tokens are in mock_stoat/app.py).
+services:
+  mock-stoat:
+    build:
+      context: .
+      dockerfile: mock_stoat/Dockerfile
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  stoat-mcp:
+    build: .
+    environment:
+      STOAT_API_URL: http://mock-stoat:8000
+      STOAT_BOT_TOKEN: service-token
+      STOAT_BOT_IDENTITIES: researcher=researcher-token,reviewer=reviewer-token
+      STOAT_SERVER_IDS: 01HSERVER00000000000000000
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      - mock-stoat
+
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.tests
+    environment:
+      E2E_STOAT_API: http://mock-stoat:8000
+      E2E_MCP_URL: http://stoat-mcp:8080/mcp
+    depends_on:
+      - stoat-mcp
