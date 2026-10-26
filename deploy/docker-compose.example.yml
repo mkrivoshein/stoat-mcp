@@ -1,0 +1,20 @@
+# Example service to merge into the Stoat node's docker-compose.app.yml.
+# It shares the Tailscale sidecar's network namespace, so the MCP port is only
+# reachable over the tailnet and the Stoat API is reached on localhost.
+services:
+  stoat-mcp:
+    build: /opt/stoat-mcp
+    container_name: stoat-mcp
+    restart: unless-stopped
+    network_mode: service:tailscale-sidecar
+    environment:
+      STOAT_API_URL: http://localhost:8000
+      STOAT_BOT_TOKEN: ${STOAT_MASTER_BOT_TOKEN}
+      STOAT_SERVER_IDS: ${STOAT_SERVER_IDS}
+      # Optional extra identities, e.g. "researcher=<token>,reviewer=<token>"
+      STOAT_BOT_IDENTITIES: ${STOAT_BOT_IDENTITIES:-}
+      # "http" serves Streamable HTTP at /mcp; use "sse" for legacy clients (/sse).
+      STOAT_MCP_TRANSPORT: http
+      STOAT_MCP_PORT: "8080"
+    depends_on:
+      - api

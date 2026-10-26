@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stoat-mcp"
+version = "0.1.0"
+description = "A private Model Context Protocol server for a self-hosted Stoat (Revolt) instance"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=4.1,<5",
+    "httpx>=0.27",
+    "cachetools>=5.3",
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+stoat-mcp = "stoat_mcp.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stoat_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
