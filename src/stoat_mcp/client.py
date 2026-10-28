@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 from cachetools import TTLCache
 
 from .config import Settings
+from .metadata import parse_metadata
 
 ULID_RE = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}", re.IGNORECASE)
 TEXT_CHANNEL_TYPES = {"TextChannel", "Group", "DirectMessage", "SavedMessages"}
@@ -272,40 +274,77 @@ class StoatClient:
                 ]
             if msg.get("system"):
                 item["system"] = msg["system"]
+            meta = parse_metadata(msg.get("content"))
+            if meta:
+                item["metadata"] = meta
             result.append(item)
         return result
 
     # ------------------------------------------------------------- Messages
 
     async def fetch_messages(
-        self, channel_id: str, limit: int, before: str | None = None
+        self,
+        channel_id: str,
+        limit: int,
+        before: str | None = None,
+        match: Callable[[dict[str, Any]], bool] | None = None,
     ) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {
-            "limit": limit,
-            "sort": "Latest",
-            "include_users": "true",
-        }
-        if before:
-            params["before"] = before
-        payload = await self.request("GET", f"/channels/{channel_id}/messages", params=params)
-        messages = await self.format_messages(payload)
+        """Return up to ``limit`` messages in chronological order.
+
+        With ``match``, returns the latest ``limit`` messages that satisfy it,
+        scanning back through at most ``search_scan_limit`` messages.
+        """
+        if match is not None:
+            messages = await self.scan_messages(channel_id, match, limit, before)
+        else:
+            params: dict[str, Any] = {
+                "limit": limit,
+                "sort": "Latest",
+                "include_users": "true",
+            }
+            if before:
+                params["before"] = before
+            payload = await self.request(
+                "GET", f"/channels/{channel_id}/messages", params=params
+            )
+            messages = await self.format_messages(payload)
         messages.reverse()  # API returns newest first; agents want chronological.
         return messages
 
     async def search_messages(
-        self, channel_id: str, query: str, limit: int
+        self,
+        channel_id: str,
+        query: str,
+        limit: int,
+        match: Callable[[dict[str, Any]], bool] | None = None,
     ) -> list[dict[str, Any]]:
-        """Find messages containing every word of ``query`` (case-insensitive).
+        """Find messages containing every word of ``query`` (case-insensitive)
+        that also satisfy ``match``, if given. Results are newest first.
 
         Stoat's ``/channels/{id}/search`` route rejects bot accounts, so this
         scans the most recent ``search_scan_limit`` messages of the channel
-        instead. Results are newest first.
+        instead.
         """
         terms = query.lower().split()
+
+        def predicate(msg: dict[str, Any]) -> bool:
+            text = (msg.get("content") or "").lower()
+            return all(t in text for t in terms) and (match is None or match(msg))
+
+        return await self.scan_messages(channel_id, predicate, limit)
+
+    async def scan_messages(
+        self,
+        channel_id: str,
+        match: Callable[[dict[str, Any]], bool],
+        limit: int,
+        before: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return up to ``limit`` raw messages satisfying ``match``, newest
+        first, scanning back through at most ``search_scan_limit`` messages."""
         hits: list[dict[str, Any]] = []
         users: list[dict[str, Any]] = []
         members: list[dict[str, Any]] = []
-        before: str | None = None
         scanned = 0
         while scanned < self.settings.search_scan_limit and len(hits) < limit:
             page_size = min(100, self.settings.search_scan_limit - scanned)
@@ -328,10 +367,7 @@ class StoatClient:
             if not page:
                 break
             scanned += len(page)
-            hits.extend(
-                m for m in page
-                if all(t in (m.get("content") or "").lower() for t in terms)
-            )
+            hits.extend(m for m in page if match(m))
             before = page[-1]["_id"]
             if len(page) < page_size:
                 break
