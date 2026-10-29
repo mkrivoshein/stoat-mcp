@@ -12,10 +12,10 @@ and the API never leave the mesh.
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `stoat_post_message` | `channel`, `content`, `reply_to?`, `identity?` | Posts a message or reply. Content over the length limit is split on paragraph/line boundaries (code fences are closed and reopened across chunks); very long content is uploaded as a `message.md` attachment instead. |
-| `stoat_read_history` | `channel`, `limit=25`, `before?` | Recent history in chronological order with author names resolved (nickname → display name → username, masquerade honoured). |
+| `stoat_post_message` | `channel`, `content`, `reply_to?`, `identity?`, `message_type?`, `metadata?` | Posts a message or reply, optionally with a [metadata header](#structured-message-metadata). Content over the length limit is split on paragraph/line boundaries (code fences are closed and reopened across chunks); very long content is uploaded as a `message.md` attachment instead. |
+| `stoat_read_history` | `channel`, `limit=25`, `before?`, `message_type?`, `metadata?` | Recent history in chronological order with author names resolved (nickname → display name → username, masquerade honoured). With a filter, returns the latest matching messages. |
 | `stoat_list_channels` | `server_id?` | Channels with name, type, topic, ID and server. |
-| `stoat_search_messages` | `query`, `channel?`, `limit=20` | Finds messages containing every word of `query`, in one channel or across all text channels of the configured servers. Stoat's search API refuses bot accounts, so this scans each channel's most recent `STOAT_SEARCH_SCAN_LIMIT` messages. |
+| `stoat_search_messages` | `query?`, `channel?`, `limit=20`, `message_type?`, `metadata?` | Finds messages containing every word of `query` and matching the metadata filter (at least one is required), in one channel or across all text channels of the configured servers. Stoat's search API refuses bot accounts, so this scans each channel's most recent `STOAT_SEARCH_SCAN_LIMIT` messages. |
 | `stoat_upload_file` | `channel`, `filename`, `file_bytes_base64`, `content?`, `identity?` | Uploads to Autumn and posts the file as an attachment. |
 | `stoat_list_identities` | — | Names of the bot identities that can be passed as `identity`. |
 
@@ -25,6 +25,49 @@ channels of the servers in `STOAT_SERVER_IDS` and cached (default 10 minutes);
 ambiguous names return an error listing the matching IDs. When a tool is
 called with an `identity`, names are resolved among the channels that bot can
 see.
+
+### Structured message metadata
+
+Agents and orchestrators can tag messages with a machine-readable header on
+the first line, so tasks and results can be routed and filtered:
+
+```
+[TASK] id:42 | priority:high
+Research the EU market for product X.
+
+[RESULT] id:42 | status:complete
+Report attached.
+```
+
+Format:
+
+- **Type** — `[TYPE]` at the very start of the message: a letter followed by
+  up to 31 letters, digits, `_` or `-`. Any type is allowed; `TASK` and
+  `RESULT` are the conventional ones. Case-insensitive, normalised to upper
+  case.
+- **Fields** (optional) — after the type and a space, `key:value` pairs
+  separated by `|`. Keys start with a letter and contain letters, digits, `_`
+  or `-` (case-insensitive, normalised to lower case). Values are trimmed and
+  may contain `:`; write a literal `|` as `\|` and `\` as `\\`. Values are
+  single-line. Suggested fields: `id` (required by convention for `TASK` and
+  `RESULT`, to pair them), `priority` (`low`/`normal`/`high`) and `status`
+  (`complete`/`partial`/`blocked`/`failed`).
+- **Body** — everything after the header line.
+
+Parsing is tolerant: a message whose first line is not a header is plain
+text, and header segments that are not `key:value` pairs are ignored.
+
+- To post with a header, pass `message_type` and optionally `metadata`
+  (e.g. `{"id": "42", "status": "complete"}`) to `stoat_post_message`; the
+  header is added and escaped for you. Writing the header into `content`
+  by hand works too.
+- Messages returned by `stoat_read_history` and `stoat_search_messages`
+  include a parsed `metadata` object (`{"type": "RESULT", "fields": {...}}`)
+  when they have a header.
+- Both tools accept `message_type` and `metadata` as filters: a message
+  matches when its type is equal and it has every given field with an equal
+  value (case-insensitive). Filtering scans the most recent
+  `STOAT_SEARCH_SCAN_LIMIT` messages of each channel.
 
 ### Multiple bot identities
 
@@ -50,7 +93,7 @@ context or client logs.
 | `STOAT_MESSAGE_LIMIT` | `2000` | Max characters per message. |
 | `STOAT_MAX_CHUNKS` | `8` | Above this many chunks, content is sent as an attachment. |
 | `STOAT_MAX_UPLOAD_BYTES` | `20971520` | Upload size cap (applies to `stoat_upload_file` and to long messages sent as attachments). |
-| `STOAT_SEARCH_SCAN_LIMIT` | `1000` | Recent messages scanned per channel by `stoat_search_messages`. |
+| `STOAT_SEARCH_SCAN_LIMIT` | `1000` | Recent messages scanned per channel by `stoat_search_messages` and filtered `stoat_read_history`. |
 | `STOAT_CACHE_TTL` | `600` | Seconds to cache channels and users. |
 | `STOAT_RATE_LIMIT_PER_SECOND` / `STOAT_RATE_LIMIT_BURST` | `5` / `10` | Client-side token bucket for API calls (`0` disables). HTTP 429 responses are retried using `retry_after`. |
 | `STOAT_REQUEST_TIMEOUT` | `15` | HTTP timeout in seconds. |

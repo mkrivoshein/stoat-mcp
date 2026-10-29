@@ -15,6 +15,7 @@ from pydantic import Field
 from .chunking import split_message
 from .client import TEXT_CHANNEL_TYPES, StoatClient, StoatError
 from .config import Settings
+from .metadata import format_header, matches
 
 INSTRUCTIONS = """\
 Tools for reading and posting to a private Stoat (Revolt) chat instance.
@@ -23,6 +24,12 @@ Use stoat_list_channels to discover channels, stoat_read_history for context,
 and stoat_post_message to deliver results. Long messages are split
 automatically. Pass `identity` to post as one of the configured bot identities
 (see stoat_list_identities).
+
+Messages can carry a metadata header for routing, e.g.
+"[TASK] id:42 | priority:high" or "[RESULT] id:42 | status:complete".
+Pass `message_type` and `metadata` to stoat_post_message to add one, and the
+same parameters to stoat_read_history or stoat_search_messages to filter by it.
+Parsed headers are returned as `metadata` on each message.
 """
 
 ChannelArg = Annotated[
@@ -31,6 +38,23 @@ ChannelArg = Annotated[
 IdentityArg = Annotated[
     str | None,
     Field(description="Optional named bot identity to act as; defaults to the service bot."),
+]
+
+MessageTypeArg = Annotated[
+    str | None,
+    Field(description="Message type for the metadata header, e.g. 'TASK' or 'RESULT'."),
+]
+MetadataArg = Annotated[
+    dict[str, str] | None,
+    Field(description="Metadata fields, e.g. {'id': '42', 'status': 'complete'}."),
+]
+TypeFilterArg = Annotated[
+    str | None,
+    Field(description="Only messages whose metadata header has this type, e.g. 'TASK'."),
+]
+MetadataFilterArg = Annotated[
+    dict[str, str] | None,
+    Field(description="Only messages whose header has all these fields, e.g. {'id': '42'}."),
 ]
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
@@ -57,6 +81,13 @@ def create_server(
         except (StoatError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
 
+    def message_filter(
+        message_type: str | None, metadata: dict[str, str] | None
+    ) -> Any:
+        if not message_type and not metadata:
+            return None
+        return lambda msg: matches(msg.get("content"), message_type, metadata)
+
     mcp = FastMCP("stoat-mcp", instructions=INSTRUCTIONS)
 
     @mcp.tool(annotations=WRITE)
@@ -67,13 +98,27 @@ def create_server(
             str | None, Field(description="Optional message ID to reply to.")
         ] = None,
         identity: IdentityArg = None,
+        message_type: MessageTypeArg = None,
+        metadata: MetadataArg = None,
     ) -> dict[str, Any]:
         """Post a message, or a threaded reply, to a Stoat channel.
+
+        With ``message_type`` (and optional ``metadata``), the message starts
+        with a header line such as ``[RESULT] id:42 | status:complete``.
 
         Content over the per-message limit is split into sequential messages on
         paragraph/line boundaries; very long content is uploaded as a Markdown
         attachment instead.
         """
+        header = ""
+        if metadata and not message_type:
+            raise ToolError("metadata requires message_type")
+        if message_type:
+            try:
+                header = format_header(message_type, metadata)
+            except ValueError as exc:
+                raise ToolError(str(exc)) from exc
+            content = f"{header}\n{content}" if content.strip() else header
         if not content.strip():
             raise ToolError("content must not be empty")
         channel_id = await resolve(channel, identity)
@@ -87,6 +132,8 @@ def create_server(
                 summary = (
                     f"Long message ({len(content):,} characters) attached as message.md."
                 )
+                if header:
+                    summary = f"{header}\n{summary}"
                 msg = await stoat().send_message(
                     channel_id,
                     summary,
@@ -121,12 +168,20 @@ def create_server(
             str | None,
             Field(description="Only return messages older than this message ID (for paging)."),
         ] = None,
+        message_type: TypeFilterArg = None,
+        metadata: MetadataFilterArg = None,
     ) -> list[dict[str, Any]]:
         """Fetch recent channel history in chronological order (oldest first),
-        with author names resolved."""
+        with author names resolved.
+
+        With ``message_type`` or ``metadata``, returns only matching messages,
+        looking back through at most STOAT_SEARCH_SCAN_LIMIT messages.
+        """
         channel_id = await resolve(channel)
         try:
-            return await stoat().fetch_messages(channel_id, limit, before)
+            return await stoat().fetch_messages(
+                channel_id, limit, before, message_filter(message_type, metadata)
+            )
         except (StoatError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
 
@@ -157,22 +212,28 @@ def create_server(
     @mcp.tool(annotations=READ_ONLY)
     async def stoat_search_messages(
         query: Annotated[
-            str, Field(description="Words that must all appear in the message (case-insensitive).")
-        ],
+            str,
+            Field(description="Words that must all appear in the message (case-insensitive). "
+                  "May be empty when filtering by message_type or metadata."),
+        ] = "",
         channel: Annotated[
             str | None,
             Field(description="Channel ID or name; omit to search all text channels."),
         ] = None,
         limit: Annotated[int, Field(ge=1, le=100, description="Maximum results.")] = 20,
+        message_type: TypeFilterArg = None,
+        metadata: MetadataFilterArg = None,
     ) -> list[dict[str, Any]]:
         """Search past messages for discussion topics or earlier deliverables.
 
         Results are newest first. Stoat does not allow bots to use its search
         API, so only the most recent messages of each channel are scanned
-        (STOAT_SEARCH_SCAN_LIMIT, default 1,000 per channel).
+        (STOAT_SEARCH_SCAN_LIMIT, default 1,000 per channel). Filter by
+        metadata header with ``message_type`` and ``metadata``.
         """
-        if not query.strip():
-            raise ToolError("query must not be empty")
+        match = message_filter(message_type, metadata)
+        if not query.strip() and match is None:
+            raise ToolError("query must not be empty unless message_type or metadata is given")
         try:
             if channel:
                 channel_ids = [await resolve(channel)]
@@ -184,7 +245,9 @@ def create_server(
                 ]
             results: list[dict[str, Any]] = []
             for channel_id in channel_ids:
-                results.extend(await stoat().search_messages(channel_id, query, limit))
+                results.extend(
+                    await stoat().search_messages(channel_id, query, limit, match)
+                )
         except (StoatError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
         if len(channel_ids) > 1:

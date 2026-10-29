@@ -197,3 +197,81 @@ def test_ulid_timestamp():
 def test_identity_config_validation():
     with pytest.raises(ValueError):
         Settings.from_env({"STOAT_BOT_IDENTITIES": "missing-token"})
+
+
+async def test_post_with_metadata_header(mcp_client, mock):
+    result = await call(mcp_client, "stoat_post_message", channel=GENERAL, content="Report attached",
+                        message_type="result", metadata={"id": "42", "status": "complete"})
+    [msg] = mock.messages[GENERAL][1:]
+    assert msg["_id"] == result["message_ids"][0]
+    assert msg["content"] == "[RESULT] id:42 | status:complete\nReport attached"
+    [item] = await call(mcp_client, "stoat_read_history", channel=GENERAL, limit=1)
+    assert item["metadata"] == {"type": "RESULT", "fields": {"id": "42", "status": "complete"}}
+
+
+async def test_post_header_only_and_validation(mcp_client, mock):
+    await call(mcp_client, "stoat_post_message", channel=GENERAL, content="",
+               message_type="RESULT", metadata={"id": "1"})
+    assert mock.messages[GENERAL][-1]["content"] == "[RESULT] id:1"
+    with pytest.raises(ToolError, match="requires message_type"):
+        await mcp_client.call_tool("stoat_post_message", {"channel": GENERAL, "content": "x", "metadata": {"id": "1"}})
+    with pytest.raises(ToolError, match="Invalid message type"):
+        await mcp_client.call_tool("stoat_post_message", {"channel": GENERAL, "content": "x", "message_type": "no way"})
+    assert len(mock.messages[GENERAL]) == 2
+
+
+async def test_plain_messages_have_no_metadata(mcp_client):
+    [item] = await call(mcp_client, "stoat_read_history", channel=GENERAL, limit=1)
+    assert "metadata" not in item
+
+
+async def test_long_message_attachment_keeps_header_in_summary(mock, transport):
+    settings = make_settings(STOAT_MESSAGE_LIMIT="100", STOAT_MAX_CHUNKS="3")
+    async with Client(create_server(settings, transport=transport)) as client:
+        await call(client, "stoat_post_message", channel="general", content="word " * 200,
+                   message_type="RESULT", metadata={"id": "9"})
+        [hit] = await call(client, "stoat_search_messages", message_type="result", metadata={"id": "9"})
+    [msg] = mock.messages[GENERAL][1:]
+    assert msg["content"].startswith("[RESULT] id:9\nLong message")
+    assert hit["message_id"] == msg["_id"]
+    assert mock.attachments[msg["attachments"][0]["_id"]]["data"].startswith(b"[RESULT] id:9\nword")
+
+
+async def _post_tasks(client):
+    posts = [
+        ("TASK", {"id": "1", "priority": "high"}, "Research EU market"),
+        ("chat", None, "unrelated chatter"),
+        ("RESULT", {"id": "1", "status": "complete"}, "EU market report"),
+        ("TASK", {"id": "2", "priority": "low"}, "Research US market"),
+        ("RESULT", {"id": "2", "status": "blocked"}, "Need access"),
+    ]
+    for message_type, metadata, content in posts:
+        if message_type == "chat":
+            await call(client, "stoat_post_message", channel=RESEARCH, content=content)
+        else:
+            await call(client, "stoat_post_message", channel=RESEARCH, content=content,
+                       message_type=message_type, metadata=metadata)
+
+
+async def test_read_history_filters_by_type_and_fields(mcp_client):
+    await _post_tasks(mcp_client)
+    tasks = await call(mcp_client, "stoat_read_history", channel=RESEARCH, message_type="task")
+    assert [m["metadata"]["fields"]["id"] for m in tasks] == ["1", "2"]  # chronological
+    done = await call(mcp_client, "stoat_read_history", channel=RESEARCH, metadata={"status": "complete"})
+    assert [m["content"] for m in done] == ["[RESULT] id:1 | status:complete\nEU market report"]
+    latest = await call(mcp_client, "stoat_read_history", channel=RESEARCH, message_type="RESULT", limit=1)
+    assert [m["metadata"]["fields"]["id"] for m in latest] == ["2"]
+    older = await call(mcp_client, "stoat_read_history", channel=RESEARCH, message_type="RESULT",
+                       before=latest[0]["message_id"])
+    assert [m["metadata"]["fields"]["id"] for m in older] == ["1"]
+
+
+async def test_search_filters_by_metadata(mcp_client):
+    await _post_tasks(mcp_client)
+    by_id = await call(mcp_client, "stoat_search_messages", metadata={"id": "2"})
+    assert [m["metadata"]["type"] for m in by_id] == ["RESULT", "TASK"]  # newest first
+    combined = await call(mcp_client, "stoat_search_messages", query="market", message_type="TASK")
+    assert [m["metadata"]["fields"]["id"] for m in combined] == ["2", "1"]
+    assert await call(mcp_client, "stoat_search_messages", message_type="DONE") == []
+    with pytest.raises(ToolError, match="query must not be empty"):
+        await mcp_client.call_tool("stoat_search_messages", {"query": " "})
